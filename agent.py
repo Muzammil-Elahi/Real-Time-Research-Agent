@@ -1,3 +1,20 @@
+"""
+Real-Time Research Agent
+========================
+This is an AI-powered research agent that uses LangChain/LangGraph to orchestrate
+an agent that can search the web, gather news, and synthesize information into
+structured research reports.
+
+Architecture:
+- Frontend: Streamlit (web UI)
+- Agent Framework: LangGraph (orchestrates agent workflow)
+- LLM: Google Gemini 2.5 Flash (via LangChain)
+- Tools: DuckDuckGo Search, News API, DuckDuckGo News
+"""
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
 import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import Tool
@@ -13,24 +30,57 @@ from duckduckgo_search import DDGS
 from newsapi import NewsApiClient
 import os
 from dotenv import load_dotenv
-# get api keys and initialize llm
+
+# ============================================================================
+# CONFIGURATION & INITIALIZATION
+# ============================================================================
+# Load environment variables from .env file
+# This allows us to store API keys securely without hardcoding them
 load_dotenv()
+
+# Get API keys from environment variables
+# These are required for the LLM and News API services
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+
+# Initialize the LLM (Large Language Model)
+# Using Google Gemini 2.5 Flash - a fast, efficient model for this use case
+# The model is bound with tools later to enable function calling
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY)
 
-# create functions for tools
+# ============================================================================
+# TOOL FUNCTIONS
+# ============================================================================
+# These functions are wrapped as LangChain Tools that the agent can call
+# Each function performs a specific task (web search, news search, etc.)
+# The agent decides when and how to use these tools based on the query
 
-# Custom DuckDuckGo search function for more control
 def search_web(query: str) -> str:
-    """Search the web using DuckDuckGo for comprehensive information"""
+    """
+    Search the web using DuckDuckGo for comprehensive information.
+    
+    This is the primary tool for gathering general background information.
+    DuckDuckGo is used because it's privacy-focused and doesn't require API keys.
+    
+    Args:
+        query: The search query string
+        
+    Returns:
+        A formatted string containing search results with titles, URLs, and snippets
+    """
     try:
+        # Initialize DuckDuckGo search client
         ddgs = DDGS()
+        
+        # Perform text search (general web search, not news-specific)
+        # max_results=10 limits the number of results for efficiency
         results = ddgs.text(query, max_results=10)
         
         if not results:
             return "No web results found."
         
+        # Format results into a readable string
+        # This format helps the LLM understand and process the information
         search_summary = "Web Search Results:\n\n"
         for idx, result in enumerate(results, 1):
             search_summary += f"{idx}. Title: {result['title']}\n"
@@ -39,28 +89,50 @@ def search_web(query: str) -> str:
         
         return search_summary
     except Exception as e:
+        # Return error message if search fails
+        # This prevents the agent from crashing and allows it to try other tools
         return f"Error searching web: {str(e)}"
 
-# News search function
 def get_news(query: str) -> str:
-    """Search for recent news articles about the query"""
+    """
+    Search for recent news articles using News API.
+    
+    News API provides access to articles from major publications worldwide.
+    This tool is used to find recent developments and current events.
+    
+    Note: Requires NEWS_API_KEY to be set in environment variables.
+    If not set, this function will fail gracefully.
+    
+    Args:
+        query: The search query string
+        
+    Returns:
+        A formatted string containing news articles with titles, sources, dates, and URLs
+    """
     try:
+        # Initialize News API client with API key
         newsapi = NewsApiClient(api_key=NEWS_API_KEY)
+        
+        # Search for articles matching the query
+        # get_everything() searches across all articles (not just headlines)
+        # sort_by='publishedAt' ensures we get the most recent articles first
         articles = newsapi.get_everything(
             q=query,
-            language='en',
-            sort_by='publishedAt',
-            page_size=10
+            language='en',  # English only
+            sort_by='publishedAt',  # Sort by publication date (newest first)
+            page_size=10  # Limit to 10 articles
         )
         
         if articles['totalResults'] == 0:
             return "No recent news articles found."
         
+        # Format results for the LLM to process
         news_summary = "Recent News Articles:\n\n"
         for idx, article in enumerate(articles['articles'][:10], 1):
             news_summary += f"{idx}. Title: {article['title']}\n"
             news_summary += f"   Source: {article['source']['name']}\n"
             news_summary += f"   Date: {article['publishedAt']}\n"
+            # Use .get() with default to handle missing descriptions
             news_summary += f"   Description: {article.get('description', 'No description')}\n"
             news_summary += f"   URL: {article['url']}\n\n"
         
@@ -68,16 +140,31 @@ def get_news(query: str) -> str:
     except Exception as e:
         return f"Error fetching news: {str(e)}"
 
-# DuckDuckGo News search function
 def duckduckgo_news(query: str) -> str:
-    """Search for recent news using DuckDuckGo News"""
+    """
+    Search for recent news using DuckDuckGo News.
+    
+    This is an alternative news source to complement News API.
+    DuckDuckGo News aggregates news from various sources and provides
+    diverse perspectives. It doesn't require an API key.
+    
+    Args:
+        query: The search query string
+        
+    Returns:
+        A formatted string containing news articles from DuckDuckGo
+    """
     try:
+        # Initialize DuckDuckGo search client
         ddgs = DDGS()
+        
+        # Search specifically for news articles (not general web results)
         news_results = ddgs.news(query, max_results=10)
         
         if not news_results:
             return "No news results found."
         
+        # Format results similar to other tools for consistency
         news_summary = "DuckDuckGo News Results:\n\n"
         for idx, article in enumerate(news_results, 1):
             news_summary += f"{idx}. Title: {article['title']}\n"
@@ -90,13 +177,26 @@ def duckduckgo_news(query: str) -> str:
     except Exception as e:
         return f"Error fetching DDG news: {str(e)}"
 
-# Clean and format markdown output
 def clean_markdown_output(raw_output: str) -> str:
     """
-    Clean the agent output to ensure it's properly formatted markdown.
-    Removes any code blocks or unwanted formatting.
+    Clean and format the agent's output to ensure proper markdown formatting.
+    
+    The LLM sometimes wraps its output in code blocks or includes prefixes.
+    This function removes unwanted formatting while preserving the actual content.
+    
+    This is important because:
+    1. The agent might wrap output in ```markdown``` code blocks
+    2. The agent might include "Final Answer:" prefix
+    3. There might be leading text before the first heading
+    
+    Args:
+        raw_output: The raw output string from the LLM
+        
+    Returns:
+        Cleaned markdown string ready for display
     """
     # Remove markdown code blocks if present
+    # LLMs sometimes wrap markdown in code blocks, which we need to remove
     cleaned_output = raw_output.strip()
     if cleaned_output.startswith("```markdown"):
         cleaned_output = cleaned_output[11:]  # Remove ```markdown
@@ -106,13 +206,15 @@ def clean_markdown_output(raw_output: str) -> str:
         cleaned_output = cleaned_output[:-3]  # Remove trailing ```
     
     # Remove "Final Answer:" prefix if present
+    # Some LLM responses include this prefix which we don't want in the final output
     if cleaned_output.startswith("Final Answer:"):
         cleaned_output = cleaned_output[13:].strip()
     elif cleaned_output.startswith("Final Answer"):
         cleaned_output = cleaned_output[12:].strip()
     
     # Remove any leading text before the first markdown heading
-    # Find the first markdown heading (##)
+    # The report should start with "## 📋 Executive Summary"
+    # If there's text before it, we remove it (but only if it's near the start)
     first_heading = cleaned_output.find("##")
     if first_heading > 0 and first_heading < 100:  # Only remove if heading is near the start
         cleaned_output = cleaned_output[first_heading:].strip()
@@ -120,11 +222,18 @@ def clean_markdown_output(raw_output: str) -> str:
     # Strip leading/trailing whitespace but preserve internal formatting
     return cleaned_output.strip()
 
-# create tools given the functions
+# ============================================================================
+# LANGCHAIN TOOLS
+# ============================================================================
+# Wrap our functions as LangChain Tools
+# Tools are what the agent can "call" to perform actions
+# The LLM reads the tool descriptions and decides which tools to use and when
+
 tools = [
     Tool(
         name="Search_Web",
         func=search_web,
+        # The description is crucial - the LLM uses this to decide when to use this tool
         description="Useful for searching general information about a person, place, or thing. Use this to get comprehensive background information, facts, and details from the web. This should be your primary tool for gathering information."
         ),
     Tool(
@@ -139,7 +248,13 @@ tools = [
     )
 ]
 
-# create prompt for agent
+# ============================================================================
+# AGENT PROMPT
+# ============================================================================
+# This is the system prompt that defines the agent's behavior and output format
+# It's passed as a SystemMessage to ensure the LLM follows these instructions
+# throughout the entire conversation
+
 RESEARCH_AGENT_PROMPT = """
 # ROLE
 You are an Expert Research Analyst AI with deep expertise in synthesizing information from multiple sources. You have advanced skills in critical thinking, fact-checking, information synthesis, and presenting complex data in clear, structured formats. You approach research with academic rigor while making findings accessible to general audiences.
@@ -251,12 +366,24 @@ TOOLS AVAILABLE:
 You MUST use at least Web Search and one news tool to gather comprehensive information before providing your final report.
 """
 
-# Create agent using LangGraph (compatible with LangChain 1.0+)
-# Define the state
+# ============================================================================
+# LANGGRAPH AGENT SETUP
+# ============================================================================
+# LangGraph is used to create a ReAct (Reasoning + Acting) agent
+# The agent can call tools, process results, and make decisions in a loop
+# until it has enough information to provide a final answer
+
+# Define the agent's state structure
+# The state contains a list of messages (conversation history)
+# Annotated[list[BaseMessage], add] means messages are appended, not replaced
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add]
 
-# Create the react prompt template
+# Create a ReAct prompt template
+# This template combines the system prompt with tool information
+# The agent uses this to understand what tools are available and how to use them
+# Note: This prompt template is created but not directly used in the current implementation
+# Instead, we pass the RESEARCH_AGENT_PROMPT as a SystemMessage
 prompt = PromptTemplate.from_template(f"""{RESEARCH_AGENT_PROMPT}
 
 You have access to the following tools:
@@ -279,63 +406,127 @@ Begin!
 Question: {{input}}
 Thought: {{agent_scratchpad}}""")
 
-# Bind tools to LLM
+# Bind tools to the LLM
+# This enables the LLM to "call" our tools (search_web, get_news, etc.)
+# When the LLM decides to use a tool, it returns a tool call instead of text
 llm_with_tools = llm.bind_tools(tools)
 
-# Create the agent graph
+# ============================================================================
+# LANGGRAPH NODE FUNCTIONS
+# ============================================================================
+
 def should_continue(state: AgentState):
+    """
+    Determine whether the agent should continue or finish.
+    
+    This function is called after the agent node to decide the next step:
+    - If the last message has tool calls → continue to tools node
+    - If the last message has no tool calls → end (agent provided final answer)
+    
+    Args:
+        state: The current agent state containing messages
+        
+    Returns:
+        "continue" if tools should be called, "end" if agent is done
+    """
     messages = state["messages"]
     last_message = messages[-1]
-    # If there are no tool calls, then we finish
+    
+    # Check if the last message contains tool calls
+    # Tool calls indicate the agent wants to use a tool
     if not last_message.tool_calls:
-        return "end"
-    # Otherwise if there are, we continue
-    return "continue"
+        return "end"  # No tool calls = agent provided final answer
+    return "continue"  # Has tool calls = need to execute tools
 
 def call_model(state: AgentState):
+    """
+    Call the LLM with the current conversation state.
+    
+    This is the "agent" node in the LangGraph workflow.
+    It:
+    1. Ensures the system prompt is included
+    2. Invokes the LLM with the conversation history
+    3. Returns the LLM's response (which may include tool calls)
+    
+    Args:
+        state: The current agent state containing messages
+        
+    Returns:
+        Updated state with the LLM's response added
+    """
     messages = state["messages"]
+    
     # Check if system message is already in the messages
+    # This is a safeguard - the system message should be added at invocation time
     has_system_message = any(isinstance(msg, SystemMessage) for msg in messages)
     
     # Prepend system message with research prompt if not present
+    # This ensures the agent always has the instructions, even if something goes wrong
     if not has_system_message:
         system_message = SystemMessage(content=RESEARCH_AGENT_PROMPT)
         messages = [system_message] + messages
     
+    # Invoke the LLM with the conversation history
+    # The LLM will either:
+    # 1. Return a text response (final answer)
+    # 2. Return tool calls (request to use tools)
     response = llm_with_tools.invoke(messages)
+    
+    # Return the response as a new message in the state
+    # The "add" annotation in AgentState means this message is appended to the list
     return {"messages": [response]}
 
-# Create the graph
+# ============================================================================
+# LANGGRAPH WORKFLOW CONSTRUCTION
+# ============================================================================
+# Build the agent workflow as a graph with nodes and edges
+# The workflow defines how the agent moves between states
+
+# Create a new StateGraph with our AgentState structure
 workflow = StateGraph(AgentState)
 
-# Add the node, we'll call this one "agent"
+# Add nodes to the graph
+# Nodes are functions that process the state
+
+# "agent" node: Calls the LLM to generate a response or tool calls
 workflow.add_node("agent", call_model)
 
-# Add the tool node
+# "tools" node: Executes tool calls returned by the agent
+# ToolNode is a prebuilt LangGraph node that automatically executes tool calls
 tool_node = ToolNode(tools)
 workflow.add_node("tools", tool_node)
 
-# Set the entrypoint as `agent`
+# Set the entry point - where the workflow starts
 workflow.set_entry_point("agent")
 
-# Add conditional edges
+# Add conditional edges from the agent node
+# After the agent runs, we check if it wants to use tools or is done
 workflow.add_conditional_edges(
-    "agent",
-    should_continue,
+    "agent",           # From this node
+    should_continue,   # Use this function to decide the next step
     {
-        "continue": "tools",
-        "end": END,
+        "continue": "tools",  # If continue → go to tools node
+        "end": END,           # If end → finish the workflow
     }
 )
 
 # Add an edge from tools back to agent
+# After tools execute, we go back to the agent to process the results
+# This creates a loop: agent → tools → agent → tools → ... → agent → end
 workflow.add_edge("tools", "agent")
 
-# Compile the graph
+# Compile the graph into an executable agent
+# MemorySaver enables conversation memory/checkpointing
+# This allows the agent to remember context across multiple interactions
 agent_executor = workflow.compile(checkpointer=MemorySaver())
 
-# create frontend
-# Streamlit UI
+# ============================================================================
+# STREAMLIT UI SETUP
+# ============================================================================
+# Streamlit is used to create the web interface
+# It automatically handles web server, routing, and state management
+
+# Configure the Streamlit page
 st.set_page_config(page_title="Real-Time Research Agent", page_icon="🔍", layout="wide")
 
 # Custom CSS
@@ -420,21 +611,27 @@ with col2:
 if clear_button:
     st.rerun()
 
-# Research execution
+# ============================================================================
+# RESEARCH EXECUTION
+# ============================================================================
+# This section handles the actual research when the user clicks "Research"
+
 if search_button and query:
+    # Validate API key before proceeding
     if not GOOGLE_API_KEY:
         st.error("⚠️ Please set your GOOGLE_API_KEY in environment variables")
     else:
-        # Progress indicators
+        # Set up progress indicators for user feedback
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         status_text.text("🔍 Initializing research...")
         progress_bar.progress(10)
         
+        # Execute the research in a spinner for visual feedback
         with st.spinner(f"🔍 Researching '{query}'..."):
             try:
-                # Create agent thought container
+                # Optional: Show agent reasoning if user enabled it
                 if show_agent_thoughts:
                     with st.expander("🧠 Agent Reasoning Process", expanded=True):
                         st.info("The agent will use multiple tools to gather comprehensive information...")
@@ -442,36 +639,70 @@ if search_button and query:
                 status_text.text("🌐 Searching the web...")
                 progress_bar.progress(30)
                 
-                # Run the agent with custom research instructions
+                # ============================================================
+                # AGENT INVOCATION
+                # ============================================================
+                # This is where the agent is actually executed
+                # The agent will:
+                # 1. Receive the query and system prompt
+                # 2. Decide which tools to use
+                # 3. Call tools (search_web, get_news, etc.)
+                # 4. Process tool results
+                # 5. Repeat until it has enough information
+                # 6. Generate the final research report
+                
+                # Construct the research query with explicit format instructions
                 research_query = f"Conduct comprehensive research on: {query}. You MUST provide your final answer as a well-formatted markdown document following the structure specified in the OUTPUT FORMAT section. Your response must be ONLY the markdown-formatted report, nothing else."
+                
+                # Configuration for the agent execution
+                # thread_id allows the agent to maintain conversation context
+                # Using "1" as a simple thread ID (in production, use unique IDs per user/session)
                 config = {"configurable": {"thread_id": "1"}}
-                # Add system message with research prompt to initial state
+                
+                # Create initial messages for the agent
+                # SystemMessage: Contains the research prompt with all instructions
+                # HumanMessage: Contains the user's research query
                 initial_messages = [
-                    SystemMessage(content=RESEARCH_AGENT_PROMPT),
-                    HumanMessage(content=research_query)
+                    SystemMessage(content=RESEARCH_AGENT_PROMPT),  # Agent instructions
+                    HumanMessage(content=research_query)           # User query
                 ]
+                
+                # Invoke the agent executor
+                # This starts the LangGraph workflow:
+                # agent → (tool calls?) → tools → agent → ... → final answer
                 result = agent_executor.invoke(
                     {"messages": initial_messages},
                     config=config
                 )
-                # Extract the final message from the agent
+                
+                # ============================================================
+                # EXTRACT FINAL ANSWER
+                # ============================================================
+                # The result contains all messages from the conversation
+                # We need to find the final answer (the last message without tool calls)
+                
                 messages = result.get("messages", [])
                 raw_output = ""
+                
                 if messages:
-                    # Find the last AIMessage that doesn't have tool calls (the final answer)
+                    # Find the last AIMessage that doesn't have tool calls
+                    # Tool calls indicate the agent wanted to use a tool
+                    # No tool calls = final answer
                     final_answer = None
                     for msg in reversed(messages):
+                        # Check if it's an AIMessage and has no tool calls
                         if isinstance(msg, AIMessage) and not (hasattr(msg, 'tool_calls') and msg.tool_calls):
                             final_answer = msg
                             break
                     
-                    # If no final answer found, use the last message
+                    # Fallback: if no final answer found, use the last message
                     if final_answer is None:
                         final_answer = messages[-1]
                     
+                    # Extract content from the message
                     if hasattr(final_answer, 'content'):
                         content = final_answer.content
-                        # Convert to string if content is a list
+                        # Handle both string and list content types
                         if isinstance(content, list):
                             raw_output = "\n".join(str(item) for item in content)
                         else:
@@ -479,9 +710,11 @@ if search_button and query:
                     else:
                         raw_output = str(final_answer)
                 else:
+                    # Fallback if no messages found
                     raw_output = str(result)
                 
                 # Clean and format the markdown output
+                # Remove code blocks, prefixes, and other unwanted formatting
                 report_text = clean_markdown_output(raw_output)
                 
                 status_text.text("✅ Research complete!")
@@ -491,23 +724,26 @@ if search_button and query:
                 progress_bar.empty()
                 status_text.empty()
                 
-                # Display results
+                # ============================================================
+                # DISPLAY RESULTS
+                # ============================================================
+                
                 st.markdown("---")
                 st.markdown("## 📊 Research Report")
                 
-                # Display the report text with proper markdown rendering
-                # The text should already contain markdown formatting (headings, bullet points, etc.)
+                # Display the report with markdown rendering
+                # Streamlit automatically renders markdown (headings, bullet points, etc.)
                 st.markdown(report_text)
                 
-                # Display the raw output (for debugging/verification)
+                # Optional: Show raw output for debugging
                 if show_agent_thoughts:
                     with st.expander("📋 Raw Output", expanded=False):
                         st.code(raw_output, language="markdown")
                 
-                # Action buttons
+                # Action buttons for user interaction
                 col1, col2 = st.columns([1, 1])
                 with col1:
-                    # Download as Markdown
+                    # Download button: Allows user to save the report as a markdown file
                     st.download_button(
                         label="📥 Download Report (MD)",
                         data=report_text,
@@ -516,10 +752,12 @@ if search_button and query:
                         use_container_width=True
                     )
                 with col2:
+                    # New search button: Reloads the page to start a new search
                     if st.button("🔄 New Search", use_container_width=True):
                         st.rerun()
                 
             except Exception as e:
+                # Error handling: Display user-friendly error messages
                 st.error(f"❌ An error occurred: {str(e)}")
                 st.info("💡 Try rephrasing your query or check your API keys.")
 
