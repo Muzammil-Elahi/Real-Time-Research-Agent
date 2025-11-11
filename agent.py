@@ -17,19 +17,21 @@ Architecture:
 # ============================================================================
 import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.tools import Tool
+from langchain_core.tools import StructuredTool
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
-from typing import Annotated
+from typing import Annotated, Dict
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, SystemMessage
 from operator import add
 from duckduckgo_search import DDGS
 from newsapi import NewsApiClient
 import os
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from fpdf import FPDF
 
 # ============================================================================
 # CONFIGURATION & INITIALIZATION
@@ -222,6 +224,114 @@ def clean_markdown_output(raw_output: str) -> str:
     # Strip leading/trailing whitespace but preserve internal formatting
     return cleaned_output.strip()
 
+
+def extract_message_content(message: BaseMessage | str | None) -> str:
+    """
+    Safely convert a LangChain message (or raw string) into plain text.
+
+    LangChain can return message content as strings, lists of content chunks,
+    or other data structures. This helper normalizes the content so the UI
+    logic and fallback synthesis can work with a clean string representation.
+    """
+    if message is None:
+        return ""
+    if isinstance(message, str):
+        return message.strip()
+
+    content = getattr(message, "content", "")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part).strip()
+
+    return str(content).strip()
+
+
+def run_direct_research_synthesis(query: str) -> tuple[str, str]:
+    """
+    Fallback pipeline that gathers research data manually and asks the LLM
+    to synthesize the final report without relying on LangGraph tool-calling.
+
+    This is used when the tool-enabled agent fails to return a usable response
+    (e.g., due to MALFORMED_FUNCTION_CALL or empty content).
+
+    Returns:
+        report_text: Cleaned markdown-ready report
+        raw_output:  Raw LLM response before markdown cleanup
+    """
+    findings: Dict[str, str] = {
+        "Web Search Results": search_web(query),
+        "News API Results": get_news(query),
+        "DuckDuckGo News Results": duckduckgo_news(query),
+    }
+
+    combined_findings = "\n\n".join(
+        f"### {section}\n{details}"
+        for section, details in findings.items()
+    )
+
+    synthesis_instruction = (
+        f"You already gathered the following findings about '{query}'. "
+        "Use ONLY this information to create the final markdown report exactly as defined in the OUTPUT FORMAT. "
+        "If a section lacks evidence, write 'No verified information available.' instead of inventing facts."
+    )
+
+    response = llm.invoke([
+        SystemMessage(content=RESEARCH_AGENT_PROMPT),
+        HumanMessage(
+            content=f"{synthesis_instruction}\n\n{combined_findings}"
+        ),
+    ])
+
+    fallback_raw_output = extract_message_content(response)
+    fallback_report = clean_markdown_output(fallback_raw_output)
+    return fallback_report, fallback_raw_output
+
+
+def convert_markdown_to_pdf_lines(markdown_text: str) -> list[str]:
+    """
+    Convert markdown to a list of printable lines for PDF output.
+    
+    This keeps the PDF generation lightweight without relying on HTML engines.
+    """
+    lines: list[str] = []
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("##"):
+            heading = line.lstrip("#").strip()
+            lines.append(heading.upper())
+            lines.append("")
+        elif line.startswith("- "):
+            lines.append(f"• {line[2:]}")
+        else:
+            lines.append(line)
+    return lines
+
+
+def create_pdf_report(markdown_text: str, subject: str) -> bytes:
+    """Generate a simple PDF version of the markdown report."""
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=14)
+    pdf.multi_cell(0, 8, f"Research Report: {subject}")
+    pdf.ln(4)
+    pdf.set_font("Helvetica", size=11)
+    for line in convert_markdown_to_pdf_lines(markdown_text):
+        pdf.multi_cell(0, 6, line if line.strip() else " ")
+    # FPDF outputs latin-1 encoded str when dest="S"
+    return pdf.output(dest="S").encode("latin-1", errors="ignore")
+
+
+class QueryInput(BaseModel):
+    """Pydantic schema for structured tool inputs."""
+
+    query: str = Field(..., description="The research subject or topic to investigate.")
+
 # ============================================================================
 # LANGCHAIN TOOLS
 # ============================================================================
@@ -230,22 +340,24 @@ def clean_markdown_output(raw_output: str) -> str:
 # The LLM reads the tool descriptions and decides which tools to use and when
 
 tools = [
-    Tool(
+    StructuredTool.from_function(
         name="Search_Web",
         func=search_web,
-        # The description is crucial - the LLM uses this to decide when to use this tool
-        description="Useful for searching general information about a person, place, or thing. Use this to get comprehensive background information, facts, and details from the web. This should be your primary tool for gathering information."
-        ),
-    Tool(
+        description="Useful for searching general information about a person, place, or thing. Use this to get comprehensive background information, facts, and details from the web. This should be your primary tool for gathering information.",
+        args_schema=QueryInput,
+    ),
+    StructuredTool.from_function(
         name="Search_News",
         func=get_news,
-        description="Useful for searching the latest news and updates about a person, place, or thing. Use this to get the latest news and updates about a person, place, or thing. This should be your secondary tool for gathering information.",
+        description="Useful for searching the latest news and updates about a person, place, or thing. This should be your secondary tool for gathering information.",
+        args_schema=QueryInput,
     ),
-    Tool(
+    StructuredTool.from_function(
         name="Get_DuckDuckGo_News",
         func=duckduckgo_news,
-        description="Useful for finding recent news from various sources via DuckDuckGo. Use this as an alternative news source to complement News API. Good for diverse perspectives and additional coverage."
-    )
+        description="Useful for finding recent news from various sources via DuckDuckGo. Use this as an alternative news source to complement News API.",
+        args_schema=QueryInput,
+    ),
 ]
 
 # ============================================================================
@@ -683,41 +795,44 @@ if search_button and query:
                 
                 messages = result.get("messages", [])
                 raw_output = ""
+                finish_reason = None
                 
                 if messages:
                     # Find the last AIMessage that doesn't have tool calls
-                    # Tool calls indicate the agent wanted to use a tool
-                    # No tool calls = final answer
                     final_answer = None
                     for msg in reversed(messages):
-                        # Check if it's an AIMessage and has no tool calls
                         if isinstance(msg, AIMessage) and not (hasattr(msg, 'tool_calls') and msg.tool_calls):
                             final_answer = msg
                             break
-                    
+                
                     # Fallback: if no final answer found, use the last message
                     if final_answer is None:
                         final_answer = messages[-1]
-                    
-                    # Extract content from the message
-                    if hasattr(final_answer, 'content'):
-                        content = final_answer.content
-                        # Handle both string and list content types
-                        if isinstance(content, list):
-                            raw_output = "\n".join(str(item) for item in content)
-                        else:
-                            raw_output = str(content)
-                    else:
-                        raw_output = str(final_answer)
+                
+                    if hasattr(final_answer, "response_metadata"):
+                        finish_reason = final_answer.response_metadata.get("finish_reason")
+                
+                    raw_output = extract_message_content(final_answer)
                 else:
                     # Fallback if no messages found
                     raw_output = str(result)
                 
                 # Clean and format the markdown output
-                # Remove code blocks, prefixes, and other unwanted formatting
                 report_text = clean_markdown_output(raw_output)
                 
-                status_text.text("✅ Research complete!")
+                fallback_used = False
+                fallback_reason = None
+                if (not report_text.strip()) or finish_reason == "MALFORMED_FUNCTION_CALL":
+                    fallback_used = True
+                    fallback_reason = finish_reason or "empty_output"
+                    status_text.text("Recovering from agent error. Re-running synthesis...")
+                    progress_bar.progress(60)
+                    report_text, raw_output = run_direct_research_synthesis(query)
+                
+                    if not report_text.strip():
+                        raise ValueError("Fallback synthesis did not return any content.")
+                
+                status_text.text("Research complete!")
                 progress_bar.progress(100)
                 
                 # Clear progress indicators
@@ -735,13 +850,18 @@ if search_button and query:
                 # Streamlit automatically renders markdown (headings, bullet points, etc.)
                 st.markdown(report_text)
                 
+                if fallback_used:
+                    st.info(f"Displayed report generated via fallback synthesizer (reason: {fallback_reason}).")
+                
+                pdf_bytes = create_pdf_report(report_text, query)
+                
                 # Optional: Show raw output for debugging
                 if show_agent_thoughts:
                     with st.expander("📋 Raw Output", expanded=False):
                         st.code(raw_output, language="markdown")
                 
                 # Action buttons for user interaction
-                col1, col2 = st.columns([1, 1])
+                col1, col2, col3 = st.columns([1, 1, 1])
                 with col1:
                     # Download button: Allows user to save the report as a markdown file
                     st.download_button(
@@ -752,6 +872,14 @@ if search_button and query:
                         use_container_width=True
                     )
                 with col2:
+                    st.download_button(
+                        label="📄 Download Report (PDF)",
+                        data=pdf_bytes,
+                        file_name=f"research_report_{query.replace(' ', '_')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                with col3:
                     # New search button: Reloads the page to start a new search
                     if st.button("🔄 New Search", use_container_width=True):
                         st.rerun()
