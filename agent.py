@@ -457,10 +457,7 @@ def display_report_section(report_state: Dict[str, Any], show_agent_thoughts: bo
         )
     with col3:
         if st.button("New Search", use_container_width=True):
-            st.session_state.query_input = ""
-            st.session_state.selected_query = ""
-            st.session_state.latest_report = None
-            reset_tool_references()
+            st.session_state.pending_reset = True
             st.rerun()
 
     references = report_state.get("tool_references") or []
@@ -823,6 +820,15 @@ if "latest_report" not in st.session_state:
     st.session_state.latest_report = None
 if "selected_query" not in st.session_state:
     st.session_state.selected_query = ""
+if "pending_reset" not in st.session_state:
+    st.session_state.pending_reset = False
+
+if st.session_state.pending_reset:
+    st.session_state.query_input = ""
+    st.session_state.latest_report = None
+    st.session_state.selected_query = ""
+    st.session_state.pending_reset = False
+    reset_tool_references()
 
 # Sidebar for settings
 with st.sidebar:
@@ -881,10 +887,7 @@ with col2:
     clear_button = st.button("Clear", use_container_width=True)
 
 if clear_button:
-    st.session_state.query_input = ""
-    st.session_state.selected_query = ""
-    st.session_state.latest_report = None
-    reset_tool_references()
+    st.session_state.pending_reset = True
     st.rerun()
 
 # ============================================================================
