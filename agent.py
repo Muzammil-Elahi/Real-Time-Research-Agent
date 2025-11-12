@@ -29,9 +29,10 @@ from operator import add
 from duckduckgo_search import DDGS
 from newsapi import NewsApiClient
 import os
+import copy
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from fpdf import FPDF, HTMLMixin
+from fpdf import FPDF
 import markdown
 import html
 
@@ -392,10 +393,6 @@ def run_direct_research_synthesis(query: str) -> tuple[str, str]:
     return fallback_report, fallback_raw_output
 
 
-class HTMLPDF(FPDF, HTMLMixin):
-    """FPDF subclass with HTML rendering support."""
-
-
 def convert_markdown_to_html(markdown_text: str) -> str:
     """Convert markdown into HTML using python-markdown with extra features."""
     html_output = markdown.markdown(
@@ -407,18 +404,80 @@ def convert_markdown_to_html(markdown_text: str) -> str:
 
 
 def create_pdf_report_from_html(html_text: str, subject: str) -> bytes:
-    """Generate a PDF from HTML content using FPDF's HTML mixin."""
-    pdf = HTMLPDF()
+    """Generate a PDF from HTML content."""
+    pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     safe_subject = html.escape(subject).encode("latin-1", "ignore").decode("latin-1")
     safe_html = html_text.encode("latin-1", "ignore").decode("latin-1")
     pdf.write_html(f"<h2>Research Report: {safe_subject}</h2>")
     pdf.write_html(safe_html)
-    output = pdf.output(dest="S")
+    output = pdf.output()
     if isinstance(output, (bytes, bytearray)):
         return bytes(output)
     return str(output).encode("latin-1", errors="ignore")
+
+
+def display_report_section(report_state: Dict[str, Any], show_agent_thoughts: bool) -> None:
+    """Render the stored research report along with controls and references."""
+    if not report_state:
+        return
+
+    st.markdown("---")
+    st.markdown("## Research Report")
+    st.markdown(report_state["report_html"], unsafe_allow_html=True)
+
+    if report_state.get("fallback_used"):
+        reason = report_state.get("fallback_reason") or "unknown_reason"
+        st.info(f"Displayed report generated via fallback synthesizer (reason: {reason}).")
+
+    pdf_bytes = create_pdf_report_from_html(report_state["report_html"], report_state["query"])
+
+    if show_agent_thoughts and report_state.get("raw_output"):
+        with st.expander("Raw Output", expanded=False):
+            st.code(report_state["raw_output"], language="markdown")
+
+    safe_query = report_state["query"].replace(" ", "_")
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1:
+        st.download_button(
+            label="Download Report (MD)",
+            data=report_state["report_text"],
+            file_name=f"research_report_{safe_query}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col2:
+        st.download_button(
+            label="Download Report (PDF)",
+            data=pdf_bytes,
+            file_name=f"research_report_{safe_query}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    with col3:
+        if st.button("New Search", use_container_width=True):
+            st.session_state.query_input = ""
+            st.session_state.selected_query = ""
+            st.session_state.latest_report = None
+            reset_tool_references()
+            st.rerun()
+
+    references = report_state.get("tool_references") or []
+    if references:
+        st.markdown("---")
+        st.markdown("### Sources & Search Queries")
+        for ref in references:
+            tool_name = ref.get("tool") or "Tool"
+            query = ref.get("query") or "N/A"
+            st.markdown(f"**{tool_name}** -- query: `{query}`")
+            for entry in ref.get("entries", []):
+                title = entry.get("title") or "Untitled Source"
+                url = entry.get("url") or ""
+                if url:
+                    st.markdown(f"- [{title}]({url})")
+                else:
+                    st.markdown(f"- {title}")
 
 
 class QueryInput(BaseModel):
@@ -757,6 +816,14 @@ st.markdown("""
 st.markdown("<h1 class='main-header'>Real-Time Research Agent</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: gray;'>Research any person, place, or thing with AI-powered analysis</p>", unsafe_allow_html=True)
 
+# Initialize persistent UI/session state
+if "query_input" not in st.session_state:
+    st.session_state.query_input = ""
+if "latest_report" not in st.session_state:
+    st.session_state.latest_report = None
+if "selected_query" not in st.session_state:
+    st.session_state.selected_query = ""
+
 # Sidebar for settings
 with st.sidebar:
     st.header("Settings")
@@ -796,10 +863,15 @@ with st.sidebar:
 # Main interface
 st.markdown("---")
 
+if st.session_state.selected_query:
+    st.session_state.query_input = st.session_state.selected_query
+    st.session_state.selected_query = ""
+
 query = st.text_input(
     "What would you like to research?",
     placeholder="e.g., Elon Musk, Paris France, Quantum Computing, ChatGPT, etc.",
-    help="Enter any person, place, thing, or concept you want to research"
+    help="Enter any person, place, thing, or concept you want to research",
+    key="query_input",
 )
 
 col1, col2, col3 = st.columns([2, 2, 6])
@@ -807,12 +879,23 @@ with col1:
     search_button = st.button("Research", type="primary", use_container_width=True)
 with col2:
     clear_button = st.button("Clear", use_container_width=True)
+
+if clear_button:
+    st.session_state.query_input = ""
+    st.session_state.selected_query = ""
+    st.session_state.latest_report = None
+    reset_tool_references()
+    st.rerun()
+
 # ============================================================================
 # RESEARCH EXECUTION
 # ============================================================================
 # This section handles the actual research when the user clicks "Research"
 
-if search_button and query:
+if search_button and not query.strip():
+    st.warning("Please enter a query to research.")
+
+if search_button and query.strip():
     # Validate API key before proceeding
     if not GOOGLE_API_KEY:
         st.error("Please set your GOOGLE_API_KEY in environment variables")
@@ -929,68 +1012,24 @@ if search_button and query:
                 progress_bar.empty()
                 status_text.empty()
                 
-                # ============================================================
-                # DISPLAY RESULTS
-                # ============================================================
-                
-                st.markdown("---")
-                st.markdown("## Research Report")
-                
-                # Display the report with markdown rendering
-                # Streamlit automatically renders markdown (headings, bullet points, etc.)
-                st.markdown(report_html, unsafe_allow_html=True)
-                
-                if fallback_used:
-                    st.info(f"Displayed report generated via fallback synthesizer (reason: {fallback_reason}).")
-                
-                pdf_bytes = create_pdf_report_from_html(report_html, query)
-                
-                # Optional: Show raw output for debugging
-                if show_agent_thoughts:
-                    with st.expander("Raw Output", expanded=False):
-                        st.code(raw_output, language="markdown")
-                
-                # Action buttons for user interaction
-                col1, col2, col3 = st.columns([1, 1, 1])
-                with col1:
-                    # Download button: Allows user to save the report as a markdown file
-                    st.download_button(
-                        label="Download Report (MD)",
-                        data=report_text,
-                        file_name=f"research_report_{query.replace(' ', '_')}.md",
-                        mime="text/markdown",
-                        use_container_width=True
-                    )
-                with col2:
-                    st.download_button(
-                        label="Download Report (PDF)",
-                        data=pdf_bytes,
-                        file_name=f"research_report_{query.replace(' ', '_')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                with col3:
-                    # New search button: Reloads the page to start a new search
-                    if st.button("New Search", use_container_width=True):
-                        st.rerun()
-                
-                if CURRENT_TOOL_REFERENCES:
-                    st.markdown("---")
-                    st.markdown("### Sources & Search Queries")
-                    for ref in CURRENT_TOOL_REFERENCES:
-                        st.markdown(f"**{ref['tool']}** -- query: `{ref['query']}`")
-                        for entry in ref["entries"]:
-                            title = entry.get("title") or "Untitled Source"
-                            url = entry.get("url") or ""
-                            if url:
-                                st.markdown(f"- [{title}]({url})")
-                            else:
-                                st.markdown(f"- {title}")
+                st.session_state.latest_report = {
+                    "query": query,
+                    "report_text": report_text,
+                    "report_html": report_html,
+                    "raw_output": raw_output,
+                    "fallback_used": fallback_used,
+                    "fallback_reason": fallback_reason,
+                    "tool_references": copy.deepcopy(CURRENT_TOOL_REFERENCES),
+                }
                 
             except Exception as e:
                 # Error handling: Display user-friendly error messages
                 st.error(f"An error occurred: {str(e)}")
                 st.info("Try rephrasing your query or check your API keys.")
+
+latest_report = st.session_state.get("latest_report")
+if latest_report:
+    display_report_section(latest_report, show_agent_thoughts)
 
 # Example queries
 st.markdown("---")
