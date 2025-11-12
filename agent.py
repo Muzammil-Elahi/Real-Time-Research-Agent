@@ -822,13 +822,29 @@ if "selected_query" not in st.session_state:
     st.session_state.selected_query = ""
 if "pending_reset" not in st.session_state:
     st.session_state.pending_reset = False
+if "research_in_progress" not in st.session_state:
+    st.session_state.research_in_progress = False
+if "active_query" not in st.session_state:
+    st.session_state.active_query = ""
+if "status_message" not in st.session_state:
+    st.session_state.status_message = None
+if "status_level" not in st.session_state:
+    st.session_state.status_level = "info"
 
 if st.session_state.pending_reset:
     st.session_state.query_input = ""
     st.session_state.latest_report = None
     st.session_state.selected_query = ""
+    st.session_state.research_in_progress = False
+    st.session_state.active_query = ""
+    st.session_state.status_message = None
     st.session_state.pending_reset = False
     reset_tool_references()
+
+if st.session_state.status_message:
+    level = st.session_state.status_level if st.session_state.status_level in {"info", "success", "warning", "error"} else "info"
+    getattr(st, level)(st.session_state.status_message)
+    st.session_state.status_message = None
 
 # Sidebar for settings
 with st.sidebar:
@@ -882,7 +898,12 @@ query = st.text_input(
 
 col1, col2, col3 = st.columns([2, 2, 6])
 with col1:
-    search_button = st.button("Research", type="primary", use_container_width=True)
+    if st.session_state.research_in_progress:
+        stop_button_clicked = st.button("Stop", type="primary", use_container_width=True, key="stop_research_button")
+        research_button_clicked = False
+    else:
+        research_button_clicked = st.button("Research", type="primary", use_container_width=True, key="start_research_button")
+        stop_button_clicked = False
 with col2:
     clear_button = st.button("Clear", use_container_width=True)
 
@@ -890,145 +911,129 @@ if clear_button:
     st.session_state.pending_reset = True
     st.rerun()
 
+if not st.session_state.research_in_progress and research_button_clicked:
+    if not query.strip():
+        st.warning("Please enter a query to research.")
+    elif not GOOGLE_API_KEY:
+        st.error("Please set your GOOGLE_API_KEY in environment variables")
+    else:
+        st.session_state.active_query = query.strip()
+        st.session_state.research_in_progress = True
+        st.session_state.status_message = None
+        st.session_state.status_level = "info"
+        st.rerun()
+
+if st.session_state.research_in_progress and stop_button_clicked:
+    st.session_state.research_in_progress = False
+    st.session_state.active_query = ""
+    st.session_state.status_level = "info"
+    st.session_state.status_message = "Research cancelled."
+    st.rerun()
+
 # ============================================================================
 # RESEARCH EXECUTION
 # ============================================================================
 # This section handles the actual research when the user clicks "Research"
 
-if search_button and not query.strip():
-    st.warning("Please enter a query to research.")
+active_query = st.session_state.active_query.strip()
 
-if search_button and query.strip():
-    # Validate API key before proceeding
-    if not GOOGLE_API_KEY:
-        st.error("Please set your GOOGLE_API_KEY in environment variables")
-    else:
-        # Set up progress indicators for user feedback
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        status_text.text("Initializing research...")
-        progress_bar.progress(10)
-        
-        # Execute the research in a spinner for visual feedback
-        with st.spinner(f"Researching '{query}'..."):
-            try:
-                # Optional: Show agent reasoning if user enabled it
-                if show_agent_thoughts:
-                    with st.expander("Agent Reasoning Process", expanded=True):
-                        st.info("The agent will use multiple tools to gather comprehensive information...")
-                
-                status_text.text("Searching the web...")
-                progress_bar.progress(30)
-                
-                # ============================================================
-                # AGENT INVOCATION
-                # ============================================================
-                # This is where the agent is actually executed
-                # The agent will:
-                # 1. Receive the query and system prompt
-                # 2. Decide which tools to use
-                # 3. Call tools (search_web, get_news, etc.)
-                # 4. Process tool results
-                # 5. Repeat until it has enough information
-                # 6. Generate the final research report
-                
-                # Construct the research query with explicit format instructions
-                research_query = f"Conduct comprehensive research on: {query}. You MUST provide your final answer as a well-formatted markdown document following the structure specified in the OUTPUT FORMAT section. Your response must be ONLY the markdown-formatted report, nothing else."
-                
-                # Configuration for the agent execution
-                # thread_id allows the agent to maintain conversation context
-                # Using "1" as a simple thread ID (in production, use unique IDs per user/session)
-                config = {"configurable": {"thread_id": "1"}}
-                
-                # Create initial messages for the agent
-                # SystemMessage: Contains the research prompt with all instructions
-                # HumanMessage: Contains the user's research query
-                initial_messages = [
-                    SystemMessage(content=RESEARCH_AGENT_PROMPT),  # Agent instructions
-                    HumanMessage(content=research_query)           # User query
-                ]
-                
-                # Invoke the agent executor
-                # This starts the LangGraph workflow:
-                # agent -> (tool calls?) -> tools -> agent -> ... -> final answer
+if st.session_state.research_in_progress and active_query:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    status_text.text("Initializing research...")
+    progress_bar.progress(10)
+
+    with st.spinner(f"Researching '{active_query}'..."):
+        try:
+            if show_agent_thoughts:
+                with st.expander("Agent Reasoning Process", expanded=True):
+                    st.info("The agent will use multiple tools to gather comprehensive information...")
+
+            status_text.text("Searching the web...")
+            progress_bar.progress(30)
+
+            research_query = (
+                f"Conduct comprehensive research on: {active_query}. "
+                "You MUST provide your final answer as a well-formatted markdown document "
+                "following the structure specified in the OUTPUT FORMAT section. "
+                "Your response must be ONLY the markdown-formatted report, nothing else."
+            )
+
+            config = {"configurable": {"thread_id": "1"}}
+
+            initial_messages = [
+                SystemMessage(content=RESEARCH_AGENT_PROMPT),
+                HumanMessage(content=research_query),
+            ]
+
+            reset_tool_references()
+
+            result = agent_executor.invoke({"messages": initial_messages}, config=config)
+
+            messages = result.get("messages", [])
+            raw_output = ""
+            finish_reason = None
+
+            if messages:
+                final_answer = None
+                for msg in reversed(messages):
+                    if isinstance(msg, AIMessage) and not (hasattr(msg, "tool_calls") and msg.tool_calls):
+                        final_answer = msg
+                        break
+
+                if final_answer is None:
+                    final_answer = messages[-1]
+
+                if hasattr(final_answer, "response_metadata"):
+                    finish_reason = final_answer.response_metadata.get("finish_reason")
+
+                raw_output = extract_message_content(final_answer)
+            else:
+                raw_output = str(result)
+
+            report_text = normalize_text_characters(clean_markdown_output(raw_output))
+            report_html = convert_markdown_to_html(report_text)
+
+            fallback_used = False
+            fallback_reason = None
+            if (not report_text.strip()) or finish_reason == "MALFORMED_FUNCTION_CALL":
+                fallback_used = True
+                fallback_reason = finish_reason or "empty_output"
+                status_text.text("Recovering from agent error. Re-running synthesis...")
+                progress_bar.progress(60)
                 reset_tool_references()
-                
-                result = agent_executor.invoke(
-                    {"messages": initial_messages},
-                    config=config
-                )
-                
-                # ============================================================
-                # EXTRACT FINAL ANSWER
-                # ============================================================
-                # The result contains all messages from the conversation
-                # We need to find the final answer (the last message without tool calls)
-                
-                messages = result.get("messages", [])
-                raw_output = ""
-                finish_reason = None
-                
-                if messages:
-                    # Find the last AIMessage that doesn't have tool calls
-                    final_answer = None
-                    for msg in reversed(messages):
-                        if isinstance(msg, AIMessage) and not (hasattr(msg, 'tool_calls') and msg.tool_calls):
-                            final_answer = msg
-                            break
-                
-                    # Fallback: if no final answer found, use the last message
-                    if final_answer is None:
-                        final_answer = messages[-1]
-                
-                    if hasattr(final_answer, "response_metadata"):
-                        finish_reason = final_answer.response_metadata.get("finish_reason")
-                
-                    raw_output = extract_message_content(final_answer)
-                else:
-                    # Fallback if no messages found
-                    raw_output = str(result)
-                
-                # Clean and format the markdown output
-                report_text = normalize_text_characters(clean_markdown_output(raw_output))
+                report_text, raw_output = run_direct_research_synthesis(active_query)
+                report_text = normalize_text_characters(report_text)
                 report_html = convert_markdown_to_html(report_text)
-                
-                fallback_used = False
-                fallback_reason = None
-                if (not report_text.strip()) or finish_reason == "MALFORMED_FUNCTION_CALL":
-                    fallback_used = True
-                    fallback_reason = finish_reason or "empty_output"
-                    status_text.text("Recovering from agent error. Re-running synthesis...")
-                    progress_bar.progress(60)
-                    reset_tool_references()
-                    report_text, raw_output = run_direct_research_synthesis(query)
-                    report_text = normalize_text_characters(report_text)
-                    report_html = convert_markdown_to_html(report_text)
-                
-                    if not report_text.strip():
-                        raise ValueError("Fallback synthesis did not return any content.")
-                
-                status_text.text("Research complete!")
-                progress_bar.progress(100)
-                
-                # Clear progress indicators
-                progress_bar.empty()
-                status_text.empty()
-                
-                st.session_state.latest_report = {
-                    "query": query,
-                    "report_text": report_text,
-                    "report_html": report_html,
-                    "raw_output": raw_output,
-                    "fallback_used": fallback_used,
-                    "fallback_reason": fallback_reason,
-                    "tool_references": copy.deepcopy(CURRENT_TOOL_REFERENCES),
-                }
-                
-            except Exception as e:
-                # Error handling: Display user-friendly error messages
-                st.error(f"An error occurred: {str(e)}")
-                st.info("Try rephrasing your query or check your API keys.")
+
+                if not report_text.strip():
+                    raise ValueError("Fallback synthesis did not return any content.")
+
+            status_text.text("Research complete!")
+            progress_bar.progress(100)
+
+            st.session_state.latest_report = {
+                "query": active_query,
+                "report_text": report_text,
+                "report_html": report_html,
+                "raw_output": raw_output,
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason,
+                "tool_references": copy.deepcopy(CURRENT_TOOL_REFERENCES),
+            }
+            st.session_state.status_message = None
+            st.session_state.status_level = "info"
+
+        except Exception as e:
+            st.session_state.status_level = "error"
+            st.session_state.status_message = f"An error occurred: {str(e)}"
+        finally:
+            progress_bar.empty()
+            status_text.empty()
+            st.session_state.research_in_progress = False
+            st.session_state.active_query = ""
+            st.rerun()
 
 latest_report = st.session_state.get("latest_report")
 if latest_report:
@@ -1036,7 +1041,7 @@ if latest_report:
 
 # Example queries
 st.markdown("---")
-with st.expander("Example Research Topics", expanded=not search_button):
+with st.expander("Example Research Topics", expanded=not st.session_state.research_in_progress):
     st.markdown("Click any example to start researching:")
     
     col1, col2, col3 = st.columns(3)
