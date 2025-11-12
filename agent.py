@@ -23,7 +23,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
-from typing import Annotated, Dict
+from typing import Annotated, Dict, List, Any
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, SystemMessage
 from operator import add
 from duckduckgo_search import DDGS
@@ -32,6 +32,7 @@ import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from fpdf import FPDF
+import textwrap
 
 # ============================================================================
 # CONFIGURATION & INITIALIZATION
@@ -49,6 +50,44 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 # Using Google Gemini 2.5 Flash - a fast, efficient model for this use case
 # The model is bound with tools later to enable function calling
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY)
+
+# Track tool references for transparency and UI display
+CURRENT_TOOL_REFERENCES: List[Dict[str, Any]] = []
+MAX_REFERENCES_PER_TOOL = 5
+
+
+def reset_tool_references():
+    """Clear tracked tool references before each new research run."""
+    global CURRENT_TOOL_REFERENCES
+    CURRENT_TOOL_REFERENCES = []
+
+
+def log_tool_reference(tool_name: str, query: str, entries: List[Dict[str, str]]):
+    """Record the sources returned by a tool for later display."""
+    global CURRENT_TOOL_REFERENCES
+    if not entries:
+        return
+    CURRENT_TOOL_REFERENCES.append(
+        {
+            "tool": tool_name,
+            "query": query,
+            "entries": entries[:MAX_REFERENCES_PER_TOOL],
+        }
+    )
+
+
+def format_tool_references_for_prompt() -> str:
+    """Create a plain-text summary of tool references for LLM instructions."""
+    if not CURRENT_TOOL_REFERENCES:
+        return "No references logged."
+    lines = []
+    for ref in CURRENT_TOOL_REFERENCES:
+        entry_text = "; ".join(
+            f"{item.get('title', 'Untitled Source')} - {item.get('url', 'No URL')}"
+            for item in ref["entries"]
+        )
+        lines.append(f"{ref['tool']} (query: {ref['query']}): {entry_text}")
+    return "\n".join(lines)
 
 # ============================================================================
 # TOOL FUNCTIONS
@@ -84,10 +123,19 @@ def search_web(query: str) -> str:
         # Format results into a readable string
         # This format helps the LLM understand and process the information
         search_summary = "Web Search Results:\n\n"
+        entries = []
         for idx, result in enumerate(results, 1):
             search_summary += f"{idx}. Title: {result['title']}\n"
             search_summary += f"   URL: {result['href']}\n"
             search_summary += f"   Snippet: {result['body']}\n\n"
+            entries.append(
+                {
+                    "title": result.get("title", "Untitled"),
+                    "url": result.get("href", ""),
+                }
+            )
+        
+        log_tool_reference("Web Search (DuckDuckGo)", query, entries)
         
         return search_summary
     except Exception as e:
@@ -130,6 +178,7 @@ def get_news(query: str) -> str:
         
         # Format results for the LLM to process
         news_summary = "Recent News Articles:\n\n"
+        entries = []
         for idx, article in enumerate(articles['articles'][:10], 1):
             news_summary += f"{idx}. Title: {article['title']}\n"
             news_summary += f"   Source: {article['source']['name']}\n"
@@ -137,6 +186,14 @@ def get_news(query: str) -> str:
             # Use .get() with default to handle missing descriptions
             news_summary += f"   Description: {article.get('description', 'No description')}\n"
             news_summary += f"   URL: {article['url']}\n\n"
+            entries.append(
+                {
+                    "title": article.get("title", "Untitled"),
+                    "url": article.get("url", ""),
+                }
+            )
+        
+        log_tool_reference("News API", query, entries)
         
         return news_summary
     except Exception as e:
@@ -168,12 +225,21 @@ def duckduckgo_news(query: str) -> str:
         
         # Format results similar to other tools for consistency
         news_summary = "DuckDuckGo News Results:\n\n"
+        entries = []
         for idx, article in enumerate(news_results, 1):
             news_summary += f"{idx}. Title: {article['title']}\n"
             news_summary += f"   Source: {article['source']}\n"
             news_summary += f"   Date: {article['date']}\n"
             news_summary += f"   Snippet: {article['body']}\n"
             news_summary += f"   URL: {article['url']}\n\n"
+            entries.append(
+                {
+                    "title": article.get("title", "Untitled"),
+                    "url": article.get("url", ""),
+                }
+            )
+        
+        log_tool_reference("DuckDuckGo News", query, entries)
         
         return news_summary
     except Exception as e:
@@ -280,16 +346,29 @@ def run_direct_research_synthesis(query: str) -> tuple[str, str]:
         "If a section lacks evidence, write 'No verified information available.' instead of inventing facts."
     )
 
+    reference_text = format_tool_references_for_prompt()
+
     response = llm.invoke([
         SystemMessage(content=RESEARCH_AGENT_PROMPT),
         HumanMessage(
-            content=f"{synthesis_instruction}\n\n{combined_findings}"
+            content=(
+                f"{synthesis_instruction}\n\n"
+                f"{combined_findings}\n\n"
+                f"Tool Reference Summary:\n{reference_text}"
+            )
         ),
     ])
 
     fallback_raw_output = extract_message_content(response)
     fallback_report = clean_markdown_output(fallback_raw_output)
     return fallback_report, fallback_raw_output
+
+
+def sanitize_pdf_text(text: str) -> str:
+    """Strip unsupported unicode for the PDF font."""
+    if not isinstance(text, str):
+        text = str(text)
+    return text.encode("latin-1", "ignore").decode("latin-1")
 
 
 def convert_markdown_to_pdf_lines(markdown_text: str) -> list[str]:
@@ -303,12 +382,12 @@ def convert_markdown_to_pdf_lines(markdown_text: str) -> list[str]:
         line = raw_line.rstrip()
         if line.startswith("##"):
             heading = line.lstrip("#").strip()
-            lines.append(heading.upper())
+            lines.append(sanitize_pdf_text(heading.upper()))
             lines.append("")
         elif line.startswith("- "):
-            lines.append(f"• {line[2:]}")
+            lines.append(sanitize_pdf_text(f"- {line[2:]}"))
         else:
-            lines.append(line)
+            lines.append(sanitize_pdf_text(line))
     return lines
 
 
@@ -318,13 +397,29 @@ def create_pdf_report(markdown_text: str, subject: str) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Helvetica", size=14)
-    pdf.multi_cell(0, 8, f"Research Report: {subject}")
+    pdf.multi_cell(0, 8, sanitize_pdf_text(f"Research Report: {subject}"))
     pdf.ln(4)
     pdf.set_font("Helvetica", size=11)
     for line in convert_markdown_to_pdf_lines(markdown_text):
-        pdf.multi_cell(0, 6, line if line.strip() else " ")
+        for chunk in wrap_pdf_line(line):
+            pdf.multi_cell(0, 6, chunk)
     # FPDF outputs latin-1 encoded str when dest="S"
     return pdf.output(dest="S").encode("latin-1", errors="ignore")
+
+
+def wrap_pdf_line(line: str, width: int = 90) -> List[str]:
+    """Break long lines so the PDF renderer never overflows."""
+    sanitized = sanitize_pdf_text(line)
+    if not sanitized.strip():
+        return [" "]
+    wrapped = textwrap.wrap(
+        sanitized,
+        width=width,
+        break_long_words=True,
+        break_on_hyphens=True,
+        replace_whitespace=False,
+    )
+    return wrapped or [sanitized]
 
 
 class QueryInput(BaseModel):
@@ -442,6 +537,12 @@ CRITICAL: Your Final Answer MUST be a well-formatted markdown document. Structur
 - [Bullet point 2]
 - [Bullet point 3]
 
+## 📚 References
+
+- [Source name](URL) - include context or query used
+- [Repeat for every verified source pulled from the tools]
+- [If a tool provided multiple important links, list each one]
+
 ## 📝 Research Notes
 
 [Any limitations, gaps in information, or areas requiring further investigation]
@@ -511,7 +612,7 @@ Action Input: the input to the action
 Observation: the result of the action
 ... (this Thought/Action/Action Input/Observation can repeat N times)
 Thought: I now have all the information needed. I will provide my final answer in the exact markdown format specified in the OUTPUT FORMAT section.
-Final Answer: [Output ONLY the markdown report starting with "## 📋 Executive Summary" - do NOT include "Final Answer:" prefix. Follow the exact structure: Executive Summary, Overview, Recent Developments, Key Facts & Details, Different Perspectives, Key Takeaways, Research Notes. Include all sections in order.]
+Final Answer: [Output ONLY the markdown report starting with "## 📋 Executive Summary" - do NOT include "Final Answer:" prefix. Follow the exact structure: Executive Summary, Overview, Recent Developments, Key Facts & Details, Different Perspectives, Key Takeaways, References, Research Notes. Include all sections in order.]
 
 Begin!
 
@@ -782,6 +883,8 @@ if search_button and query:
                 # Invoke the agent executor
                 # This starts the LangGraph workflow:
                 # agent → (tool calls?) → tools → agent → ... → final answer
+                reset_tool_references()
+                
                 result = agent_executor.invoke(
                     {"messages": initial_messages},
                     config=config
@@ -827,6 +930,7 @@ if search_button and query:
                     fallback_reason = finish_reason or "empty_output"
                     status_text.text("Recovering from agent error. Re-running synthesis...")
                     progress_bar.progress(60)
+                    reset_tool_references()
                     report_text, raw_output = run_direct_research_synthesis(query)
                 
                     if not report_text.strip():
@@ -883,6 +987,19 @@ if search_button and query:
                     # New search button: Reloads the page to start a new search
                     if st.button("🔄 New Search", use_container_width=True):
                         st.rerun()
+                
+                if CURRENT_TOOL_REFERENCES:
+                    st.markdown("---")
+                    st.markdown("### 🔗 Sources & Search Queries")
+                    for ref in CURRENT_TOOL_REFERENCES:
+                        st.markdown(f"**{ref['tool']}** — query: `{ref['query']}`")
+                        for entry in ref["entries"]:
+                            title = entry.get("title") or "Untitled Source"
+                            url = entry.get("url") or ""
+                            if url:
+                                st.markdown(f"- [{title}]({url})")
+                            else:
+                                st.markdown(f"- {title}")
                 
             except Exception as e:
                 # Error handling: Display user-friendly error messages
