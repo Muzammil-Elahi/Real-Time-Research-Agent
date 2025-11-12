@@ -23,8 +23,14 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
-from typing import Annotated, Dict, List, Any
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, SystemMessage
+from typing import Annotated, Dict, List, Any, Callable, Optional, Union
+from langchain_core.messages import (
+    HumanMessage,
+    AIMessage,
+    BaseMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from operator import add
 from duckduckgo_search import DDGS
 from newsapi import NewsApiClient
@@ -102,6 +108,40 @@ def format_tool_references_for_prompt() -> str:
         )
         lines.append(f"{ref['tool']} (query: {ref['query']}): {entry_text}")
     return "\n".join(lines)
+
+
+def truncate_reasoning_text(text: str, max_chars: int = 420, max_lines: int = 6) -> str:
+    """Condense long reasoning/tool outputs so the UI remains readable."""
+    if not text:
+        return ""
+    normalized = str(text).replace("\r\n", "\n").strip()
+    if not normalized:
+        return ""
+    lines = normalized.split("\n")
+    truncated = False
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        truncated = True
+    snippet = "\n".join(lines)
+    if len(snippet) > max_chars:
+        snippet = snippet[:max_chars].rstrip()
+        truncated = True
+    if truncated:
+        snippet += " ..."
+    return snippet
+
+
+def format_tool_arguments(args: Any) -> str:
+    """Create a concise, human-readable summary of tool arguments."""
+    if args is None:
+        return ""
+    if isinstance(args, dict):
+        if "query" in args:
+            return str(args["query"])
+        return ", ".join(
+            f"{key}={value}" for key, value in args.items() if value is not None
+        )
+    return str(args)
 
 # ============================================================================
 # TOOL FUNCTIONS
@@ -346,6 +386,51 @@ def extract_message_content(message: BaseMessage | str | None) -> str:
     return str(content).strip()
 
 
+def render_reasoning_updates(
+    update_payload: Dict[str, Any], log_callback: Optional[Callable[[str], None]]
+) -> None:
+    """
+    Convert LangGraph streaming updates into human-readable reasoning entries.
+
+    Args:
+        update_payload: Raw node updates emitted by LangGraph (stream_mode="updates")
+        log_callback:   Function that records formatted log lines for the UI
+    """
+    if not update_payload or log_callback is None:
+        return
+
+    for node_name, node_update in update_payload.items():
+        messages = node_update.get("messages")
+        if not messages:
+            continue
+
+        for message in messages:
+            if isinstance(message, AIMessage):
+                text = truncate_reasoning_text(extract_message_content(message))
+                if text:
+                    label = (
+                        "Agent Thought" if getattr(message, "tool_calls", None) else "Agent Response"
+                    )
+                    log_callback(f"**{label}:** {text}")
+
+                for tool_call in getattr(message, "tool_calls", []) or []:
+                    tool_name = tool_call.get("name", "Tool")
+                    arg_preview = format_tool_arguments(tool_call.get("args"))
+                    details = arg_preview if arg_preview else "(no arguments provided)"
+                    log_callback(f"**Action ({tool_name}):** {details}")
+
+            elif isinstance(message, ToolMessage):
+                tool_name = getattr(message, "name", "Tool Result")
+                observation = truncate_reasoning_text(extract_message_content(message))
+                if observation:
+                    log_callback(f"**Observation ({tool_name}):** {observation}")
+
+            else:
+                content = truncate_reasoning_text(extract_message_content(message))
+                if content:
+                    log_callback(f"**{node_name.title()} Update:** {content}")
+
+
 def run_direct_research_synthesis(query: str) -> tuple[str, str]:
     """
     Fallback pipeline that gathers research data manually and asks the LLM
@@ -432,6 +517,13 @@ def display_report_section(report_state: Dict[str, Any], show_agent_thoughts: bo
         st.info(f"Displayed report generated via fallback synthesizer (reason: {reason}).")
 
     pdf_bytes = create_pdf_report_from_html(report_state["report_html"], report_state["query"])
+
+    if show_agent_thoughts:
+        reasoning_log = report_state.get("reasoning_log") or []
+        if reasoning_log:
+            with st.expander("Agent Reasoning Process", expanded=False):
+                for entry in reasoning_log:
+                    st.markdown(entry)
 
     if show_agent_thoughts and report_state.get("raw_output"):
         with st.expander("Raw Output", expanded=False):
@@ -944,11 +1036,28 @@ if st.session_state.research_in_progress and active_query:
     status_text.text("Initializing research...")
     progress_bar.progress(10)
 
+    reasoning_placeholder = None
+    reasoning_logs: List[str] = []
+
+    def append_reasoning_entry(entry: str) -> None:
+        """Append a new line to the live reasoning log and refresh the UI."""
+        if reasoning_placeholder is None:
+            return
+        reasoning_logs.append(entry)
+        reasoning_placeholder.markdown("\n\n".join(reasoning_logs))
+
+    stream_mode: Union[str, List[str]] = "values"
+
     with st.spinner(f"Researching '{active_query}'..."):
         try:
             if show_agent_thoughts:
-                with st.expander("Agent Reasoning Process", expanded=True):
-                    st.info("The agent will use multiple tools to gather comprehensive information...")
+                reasoning_expander = st.expander("Agent Reasoning Process", expanded=True)
+                with reasoning_expander:
+                    reasoning_placeholder = st.empty()
+                append_reasoning_entry(
+                    "The agent will use multiple tools to gather comprehensive information..."
+                )
+                stream_mode = ["updates", "values"]
 
             status_text.text("Searching the web...")
             progress_bar.progress(30)
@@ -969,7 +1078,30 @@ if st.session_state.research_in_progress and active_query:
 
             reset_tool_references()
 
-            result = agent_executor.invoke({"messages": initial_messages}, config=config)
+            final_state = None
+            multi_mode = isinstance(stream_mode, (list, tuple))
+
+            for event in agent_executor.stream(
+                {"messages": initial_messages},
+                config=config,
+                stream_mode=stream_mode,
+            ):
+                if multi_mode:
+                    if not isinstance(event, tuple) or len(event) != 2:
+                        continue
+                    mode, payload = event
+                else:
+                    mode, payload = stream_mode, event
+
+                if mode == "updates" and show_agent_thoughts:
+                    render_reasoning_updates(payload, append_reasoning_entry)
+                elif mode == "values":
+                    final_state = payload
+
+            if final_state is None:
+                raise ValueError("Agent run did not yield a final state.")
+
+            result = final_state
 
             messages = result.get("messages", [])
             raw_output = ""
@@ -1000,6 +1132,7 @@ if st.session_state.research_in_progress and active_query:
             if (not report_text.strip()) or finish_reason == "MALFORMED_FUNCTION_CALL":
                 fallback_used = True
                 fallback_reason = finish_reason or "empty_output"
+                append_reasoning_entry(f"[Fallback] Triggered because: {fallback_reason}")
                 status_text.text("Recovering from agent error. Re-running synthesis...")
                 progress_bar.progress(60)
                 reset_tool_references()
@@ -1009,9 +1142,11 @@ if st.session_state.research_in_progress and active_query:
 
                 if not report_text.strip():
                     raise ValueError("Fallback synthesis did not return any content.")
+                append_reasoning_entry("[Fallback] Direct synthesis completed successfully.")
 
             status_text.text("Research complete!")
             progress_bar.progress(100)
+            append_reasoning_entry("Final report generated.")
 
             st.session_state.latest_report = {
                 "query": active_query,
@@ -1021,11 +1156,13 @@ if st.session_state.research_in_progress and active_query:
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "tool_references": copy.deepcopy(CURRENT_TOOL_REFERENCES),
+                "reasoning_log": copy.deepcopy(reasoning_logs),
             }
             st.session_state.status_message = None
             st.session_state.status_level = "info"
 
         except Exception as e:
+            append_reasoning_entry(f"[Error] {str(e)}")
             st.session_state.status_level = "error"
             st.session_state.status_message = f"An error occurred: {str(e)}"
         finally:
