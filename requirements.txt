@@ -8,3 +8,4 @@ newsapi-python
 python-dotenv
 typing-extensions
 fpdf2
+markdown

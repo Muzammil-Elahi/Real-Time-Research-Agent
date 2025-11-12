@@ -31,8 +31,21 @@ from newsapi import NewsApiClient
 import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from fpdf import FPDF
-import textwrap
+from fpdf import FPDF, HTMLMixin
+import markdown
+import html
+
+# Mapping of unsupported smart punctuation to ASCII equivalents
+SMART_CHAR_MAP = str.maketrans({
+    "’": "'",
+    "‘": "'",
+    "“": '"',
+    "”": '"',
+    "–": "-",
+    "—": "-",
+    "…": "...",
+    "•": "-",
+})
 
 # ============================================================================
 # CONFIGURATION & INITIALIZATION
@@ -289,7 +302,7 @@ def clean_markdown_output(raw_output: str) -> str:
         cleaned_output = cleaned_output[12:].strip()
     
     # Remove any leading text before the first markdown heading
-    # The report should start with "## 📋 Executive Summary"
+    # The report should start with "## Executive Summary"
     # If there's text before it, we remove it (but only if it's near the start)
     first_heading = cleaned_output.find("##")
     if first_heading > 0 and first_heading < 100:  # Only remove if heading is near the start
@@ -297,6 +310,13 @@ def clean_markdown_output(raw_output: str) -> str:
     
     # Strip leading/trailing whitespace but preserve internal formatting
     return cleaned_output.strip()
+
+
+def normalize_text_characters(text: str) -> str:
+    """Replace smart quotes/dashes with ASCII equivalents for PDF compatibility."""
+    if not isinstance(text, str):
+        text = str(text)
+    return text.translate(SMART_CHAR_MAP)
 
 
 def extract_message_content(message: BaseMessage | str | None) -> str:
@@ -372,62 +392,33 @@ def run_direct_research_synthesis(query: str) -> tuple[str, str]:
     return fallback_report, fallback_raw_output
 
 
-def sanitize_pdf_text(text: str) -> str:
-    """Strip unsupported unicode for the PDF font."""
-    if not isinstance(text, str):
-        text = str(text)
-    return text.encode("latin-1", "ignore").decode("latin-1")
+class HTMLPDF(FPDF, HTMLMixin):
+    """FPDF subclass with HTML rendering support."""
 
 
-def convert_markdown_to_pdf_lines(markdown_text: str) -> list[str]:
-    """
-    Convert markdown to a list of printable lines for PDF output.
-    
-    This keeps the PDF generation lightweight without relying on HTML engines.
-    """
-    lines: list[str] = []
-    for raw_line in markdown_text.splitlines():
-        line = raw_line.rstrip()
-        if line.startswith("##"):
-            heading = line.lstrip("#").strip()
-            lines.append(sanitize_pdf_text(heading.upper()))
-            lines.append("")
-        elif line.startswith("- "):
-            lines.append(sanitize_pdf_text(f"- {line[2:]}"))
-        else:
-            lines.append(sanitize_pdf_text(line))
-    return lines
+def convert_markdown_to_html(markdown_text: str) -> str:
+    """Convert markdown into HTML using python-markdown with extra features."""
+    html_output = markdown.markdown(
+        markdown_text,
+        extensions=["extra", "sane_lists"],
+        output_format="html5",
+    )
+    return normalize_text_characters(html_output)
 
 
-def create_pdf_report(markdown_text: str, subject: str) -> bytes:
-    """Generate a simple PDF version of the markdown report."""
-    pdf = FPDF()
+def create_pdf_report_from_html(html_text: str, subject: str) -> bytes:
+    """Generate a PDF from HTML content using FPDF's HTML mixin."""
+    pdf = HTMLPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Helvetica", size=14)
-    pdf.multi_cell(0, 8, sanitize_pdf_text(f"Research Report: {subject}"))
-    pdf.ln(4)
-    pdf.set_font("Helvetica", size=11)
-    for line in convert_markdown_to_pdf_lines(markdown_text):
-        for chunk in wrap_pdf_line(line):
-            pdf.multi_cell(0, 6, chunk)
-    # FPDF outputs latin-1 encoded str when dest="S"
-    return pdf.output(dest="S").encode("latin-1", errors="ignore")
-
-
-def wrap_pdf_line(line: str, width: int = 90) -> List[str]:
-    """Break long lines so the PDF renderer never overflows."""
-    sanitized = sanitize_pdf_text(line)
-    if not sanitized.strip():
-        return [" "]
-    wrapped = textwrap.wrap(
-        sanitized,
-        width=width,
-        break_long_words=True,
-        break_on_hyphens=True,
-        replace_whitespace=False,
-    )
-    return wrapped or [sanitized]
+    safe_subject = html.escape(subject).encode("latin-1", "ignore").decode("latin-1")
+    safe_html = html_text.encode("latin-1", "ignore").decode("latin-1")
+    pdf.write_html(f"<h2>Research Report: {safe_subject}</h2>")
+    pdf.write_html(safe_html)
+    output = pdf.output(dest="S")
+    if isinstance(output, (bytes, bytearray)):
+        return bytes(output)
+    return str(output).encode("latin-1", errors="ignore")
 
 
 class QueryInput(BaseModel):
@@ -519,51 +510,44 @@ Your goal is to provide a comprehensive, accurate, and well-structured research 
 # OUTPUT FORMAT
 CRITICAL: Your Final Answer MUST be a well-formatted markdown document. Structure your response EXACTLY as follows:
 
-## 📋 Executive Summary
-
+## Executive Summary
 [2-3 sentence overview of the subject]
 
-## 📖 Overview
-
+## Overview
 [Comprehensive background information]
 
-## 📰 Recent Developments
-
+## Recent Developments
 [Latest news, events, or updates from the past 6-12 months]
 
-## 📊 Key Facts & Details
-
+## Key Facts and Details
 [Important specific information, statistics, dates, etc.]
 
-## 💭 Different Perspectives
-
+## Different Perspectives
 [If applicable, present multiple viewpoints or controversies]
 
-## ✨ Key Takeaways
-
+## Key Takeaways
 - [Bullet point 1]
 - [Bullet point 2]
 - [Bullet point 3]
 
-## 📚 References
-
-- [Source name](URL) - include context or query used
-- [Repeat for every verified source pulled from the tools]
-- [If a tool provided multiple important links, list each one]
-
-## 📝 Research Notes
+## References
+- [Source name](URL) - include context or query used
+- [Repeat for every verified source pulled from the tools]
+- [If a tool provided multiple important links, list each one]
 
+## Research Notes
 [Any limitations, gaps in information, or areas requiring further investigation]
 
-CRITICAL REMINDERS: 
+CRITICAL REMINDERS:
 - Your FINAL ANSWER must be ONLY the markdown-formatted report, nothing else
-- Do NOT include "Final Answer:" or any prefix - just start with "## 📋 Executive Summary"
+- Do NOT include "Final Answer:" or any prefix - just start with "## Executive Summary"
 - You MUST include ALL sections listed above in the exact order shown
-- Each section MUST start with its markdown heading (e.g., ## 📋 Executive Summary)
+- Each section MUST start with its markdown heading (e.g., ## Executive Summary)
 - Include blank lines between sections for readability
 - Use bullet points (-) for Key Takeaways section
+- The References section MUST cite real URLs surfaced by the tools (do not invent or leave blank)
 - Format the entire report as a clean, readable markdown document
-- When you are ready to provide the final answer, output ONLY the markdown report starting with "## 📋 Executive Summary"
+- When you are ready to provide the final answer, output ONLY the markdown report starting with "## Executive Summary"
 
 # CONSTRAINTS
 - Always verify information across multiple sources when possible
@@ -578,6 +562,7 @@ CRITICAL REMINDERS:
 - For people: Focus on notable achievements, current activities, background, and public impact
 - For places: Cover geography, history, current significance, demographics, and recent developments
 - For things/concepts: Explain definition, origin, current usage, significance, and recent innovations
+- Mention the specific tools or queries used when listing references when it adds clarity
 
 TOOLS AVAILABLE:
 - Web Search: Use for general web information and background (USE THIS FIRST)
@@ -620,7 +605,7 @@ Action Input: the input to the action
 Observation: the result of the action
 ... (this Thought/Action/Action Input/Observation can repeat N times)
 Thought: I now have all the information needed. I will provide my final answer in the exact markdown format specified in the OUTPUT FORMAT section.
-Final Answer: [Output ONLY the markdown report starting with "## 📋 Executive Summary" - do NOT include "Final Answer:" prefix. Follow the exact structure: Executive Summary, Overview, Recent Developments, Key Facts & Details, Different Perspectives, Key Takeaways, References, Research Notes. Include all sections in order.]
+Final Answer: [Output ONLY the markdown report starting with "## Executive Summary" - do NOT include "Final Answer:" prefix. Follow the exact structure: Executive Summary, Overview, Recent Developments, Key Facts & Details, Different Perspectives, Key Takeaways, References, Research Notes. Include all sections in order.]
 
 Begin!
 
@@ -641,8 +626,8 @@ def should_continue(state: AgentState):
     Determine whether the agent should continue or finish.
     
     This function is called after the agent node to decide the next step:
-    - If the last message has tool calls → continue to tools node
-    - If the last message has no tool calls → end (agent provided final answer)
+    - If the last message has tool calls -> continue to tools node
+    - If the last message has no tool calls -> end (agent provided final answer)
     
     Args:
         state: The current agent state containing messages
@@ -726,14 +711,14 @@ workflow.add_conditional_edges(
     "agent",           # From this node
     should_continue,   # Use this function to decide the next step
     {
-        "continue": "tools",  # If continue → go to tools node
-        "end": END,           # If end → finish the workflow
+        "continue": "tools",  # If continue -> go to tools node
+        "end": END,           # If end -> finish the workflow
     }
 )
 
 # Add an edge from tools back to agent
 # After tools execute, we go back to the agent to process the results
-# This creates a loop: agent → tools → agent → tools → ... → agent → end
+# This creates a loop: agent -> tools -> agent -> tools -> ... -> agent -> end
 workflow.add_edge("tools", "agent")
 
 # Compile the graph into an executable agent
@@ -748,7 +733,7 @@ agent_executor = workflow.compile(checkpointer=MemorySaver())
 # It automatically handles web server, routing, and state management
 
 # Configure the Streamlit page
-st.set_page_config(page_title="Real-Time Research Agent", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Real-Time Research Agent", layout="wide")
 
 # Custom CSS
 st.markdown("""
@@ -769,26 +754,23 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 class='main-header'>🔍 Real-Time Research Agent</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='main-header'>Real-Time Research Agent</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: gray;'>Research any person, place, or thing with AI-powered analysis</p>", unsafe_allow_html=True)
 
 # Sidebar for settings
 with st.sidebar:
-    st.header("⚙️ Settings")
-    
+    st.header("Settings")
     show_agent_thoughts = st.checkbox("Show Agent Reasoning", value=False, help="Display the agent's thought process and tool usage")
-    
     st.markdown("---")
-    st.markdown("### 🔧 Tools Used")
+    st.markdown("### Tools Used")
     st.markdown("""
     - **DuckDuckGo Search**: General web information
     - **News API**: Recent news from major publications
     - **DuckDuckGo News**: Additional news coverage
-    - **Gemini flash**: AI analysis and synthesis
+    - **Gemini Flash**: AI analysis and synthesis
     """)
-    
     st.markdown("---")
-    st.markdown("### 📖 About")
+    st.markdown("### About")
     st.markdown("""
     This research agent:
     - Searches the web comprehensively
@@ -797,41 +779,34 @@ with st.sidebar:
     - Provides structured reports
     - Cross-references sources
     """)
-    
     st.markdown("---")
-    st.markdown("### 🔑 API Keys Required")
-    google_key_status = "✅" if GOOGLE_API_KEY else "❌"
-    news_key_status = "✅" if NEWS_API_KEY else "❌"
+    st.markdown("### API Keys Required")
+    google_key_status = "Ready" if GOOGLE_API_KEY else "Missing"
+    news_key_status = "Ready" if NEWS_API_KEY else "Missing"
     st.markdown(f"- Google API Key: {google_key_status}")
     st.markdown(f"- News API Key: {news_key_status}")
-    
     st.markdown("---")
-    st.markdown("### 📝 About Report Format")
+    st.markdown("### About Report Format")
     st.markdown("""
     Reports are formatted with markdown for human readability:
     - Clear section headings
     - Bullet points for key takeaways
     - Structured sections for easy navigation
     """)
-
 # Main interface
 st.markdown("---")
 
 query = st.text_input(
-    "🔎 What would you like to research?",
+    "What would you like to research?",
     placeholder="e.g., Elon Musk, Paris France, Quantum Computing, ChatGPT, etc.",
     help="Enter any person, place, thing, or concept you want to research"
 )
 
 col1, col2, col3 = st.columns([2, 2, 6])
 with col1:
-    search_button = st.button("🔍 Research", type="primary", use_container_width=True)
+    search_button = st.button("Research", type="primary", use_container_width=True)
 with col2:
-    clear_button = st.button("🗑️ Clear", use_container_width=True)
-
-if clear_button:
-    st.rerun()
-
+    clear_button = st.button("Clear", use_container_width=True)
 # ============================================================================
 # RESEARCH EXECUTION
 # ============================================================================
@@ -840,24 +815,24 @@ if clear_button:
 if search_button and query:
     # Validate API key before proceeding
     if not GOOGLE_API_KEY:
-        st.error("⚠️ Please set your GOOGLE_API_KEY in environment variables")
+        st.error("Please set your GOOGLE_API_KEY in environment variables")
     else:
         # Set up progress indicators for user feedback
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        status_text.text("🔍 Initializing research...")
+        status_text.text("Initializing research...")
         progress_bar.progress(10)
         
         # Execute the research in a spinner for visual feedback
-        with st.spinner(f"🔍 Researching '{query}'..."):
+        with st.spinner(f"Researching '{query}'..."):
             try:
                 # Optional: Show agent reasoning if user enabled it
                 if show_agent_thoughts:
-                    with st.expander("🧠 Agent Reasoning Process", expanded=True):
+                    with st.expander("Agent Reasoning Process", expanded=True):
                         st.info("The agent will use multiple tools to gather comprehensive information...")
                 
-                status_text.text("🌐 Searching the web...")
+                status_text.text("Searching the web...")
                 progress_bar.progress(30)
                 
                 # ============================================================
@@ -890,7 +865,7 @@ if search_button and query:
                 
                 # Invoke the agent executor
                 # This starts the LangGraph workflow:
-                # agent → (tool calls?) → tools → agent → ... → final answer
+                # agent -> (tool calls?) -> tools -> agent -> ... -> final answer
                 reset_tool_references()
                 
                 result = agent_executor.invoke(
@@ -929,7 +904,8 @@ if search_button and query:
                     raw_output = str(result)
                 
                 # Clean and format the markdown output
-                report_text = clean_markdown_output(raw_output)
+                report_text = normalize_text_characters(clean_markdown_output(raw_output))
+                report_html = convert_markdown_to_html(report_text)
                 
                 fallback_used = False
                 fallback_reason = None
@@ -940,6 +916,8 @@ if search_button and query:
                     progress_bar.progress(60)
                     reset_tool_references()
                     report_text, raw_output = run_direct_research_synthesis(query)
+                    report_text = normalize_text_characters(report_text)
+                    report_html = convert_markdown_to_html(report_text)
                 
                     if not report_text.strip():
                         raise ValueError("Fallback synthesis did not return any content.")
@@ -956,20 +934,20 @@ if search_button and query:
                 # ============================================================
                 
                 st.markdown("---")
-                st.markdown("## 📊 Research Report")
+                st.markdown("## Research Report")
                 
                 # Display the report with markdown rendering
                 # Streamlit automatically renders markdown (headings, bullet points, etc.)
-                st.markdown(report_text)
+                st.markdown(report_html, unsafe_allow_html=True)
                 
                 if fallback_used:
                     st.info(f"Displayed report generated via fallback synthesizer (reason: {fallback_reason}).")
                 
-                pdf_bytes = create_pdf_report(report_text, query)
+                pdf_bytes = create_pdf_report_from_html(report_html, query)
                 
                 # Optional: Show raw output for debugging
                 if show_agent_thoughts:
-                    with st.expander("📋 Raw Output", expanded=False):
+                    with st.expander("Raw Output", expanded=False):
                         st.code(raw_output, language="markdown")
                 
                 # Action buttons for user interaction
@@ -977,7 +955,7 @@ if search_button and query:
                 with col1:
                     # Download button: Allows user to save the report as a markdown file
                     st.download_button(
-                        label="📥 Download Report (MD)",
+                        label="Download Report (MD)",
                         data=report_text,
                         file_name=f"research_report_{query.replace(' ', '_')}.md",
                         mime="text/markdown",
@@ -985,7 +963,7 @@ if search_button and query:
                     )
                 with col2:
                     st.download_button(
-                        label="📄 Download Report (PDF)",
+                        label="Download Report (PDF)",
                         data=pdf_bytes,
                         file_name=f"research_report_{query.replace(' ', '_')}.pdf",
                         mime="application/pdf",
@@ -993,14 +971,14 @@ if search_button and query:
                     )
                 with col3:
                     # New search button: Reloads the page to start a new search
-                    if st.button("🔄 New Search", use_container_width=True):
+                    if st.button("New Search", use_container_width=True):
                         st.rerun()
                 
                 if CURRENT_TOOL_REFERENCES:
                     st.markdown("---")
-                    st.markdown("### 🔗 Sources & Search Queries")
+                    st.markdown("### Sources & Search Queries")
                     for ref in CURRENT_TOOL_REFERENCES:
-                        st.markdown(f"**{ref['tool']}** — query: `{ref['query']}`")
+                        st.markdown(f"**{ref['tool']}** -- query: `{ref['query']}`")
                         for entry in ref["entries"]:
                             title = entry.get("title") or "Untitled Source"
                             url = entry.get("url") or ""
@@ -1011,18 +989,18 @@ if search_button and query:
                 
             except Exception as e:
                 # Error handling: Display user-friendly error messages
-                st.error(f"❌ An error occurred: {str(e)}")
-                st.info("💡 Try rephrasing your query or check your API keys.")
+                st.error(f"An error occurred: {str(e)}")
+                st.info("Try rephrasing your query or check your API keys.")
 
 # Example queries
 st.markdown("---")
-with st.expander("💡 Example Research Topics", expanded=not search_button):
+with st.expander("Example Research Topics", expanded=not search_button):
     st.markdown("Click any example to start researching:")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("**👤 People**")
+        st.markdown("**People**")
         people = ["Elon Musk", "Taylor Swift", "Satya Nadella", "Sam Altman"]
         for person in people:
             if st.button(person, key=f"person_{person}", use_container_width=True):
@@ -1030,7 +1008,7 @@ with st.expander("💡 Example Research Topics", expanded=not search_button):
                 st.rerun()
     
     with col2:
-        st.markdown("**🌍 Places**")
+        st.markdown("**Places**")
         places = ["Tokyo Japan", "Grand Canyon", "CERN", "Mars"]
         for place in places:
             if st.button(place, key=f"place_{place}", use_container_width=True):
@@ -1038,7 +1016,7 @@ with st.expander("💡 Example Research Topics", expanded=not search_button):
                 st.rerun()
     
     with col3:
-        st.markdown("**💡 Things/Concepts**")
+        st.markdown("**Things/Concepts**")
         things = ["Quantum Computing", "CRISPR", "ChatGPT", "Blockchain"]
         for thing in things:
             if st.button(thing, key=f"thing_{thing}", use_container_width=True):
@@ -1049,8 +1027,10 @@ with st.expander("💡 Example Research Topics", expanded=not search_button):
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray; padding: 1rem;'>"
-    "Built with ❤️ using LangChain, Gemini, DuckDuckGo, and Streamlit<br>"
+    "Built with dedication using LangChain, Gemini, DuckDuckGo, and Streamlit<br>"
     "No Google Custom Search API required!"
     "</div>",
     unsafe_allow_html=True
 )
+
+
