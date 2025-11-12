@@ -197,7 +197,15 @@ def get_news(query: str) -> str:
         
         return news_summary
     except Exception as e:
-        return f"Error fetching news: {str(e)}"
+        error_text = str(e)
+        lowered = error_text.lower()
+        if "rate limit" in lowered or "429" in lowered:
+            fallback_results = duckduckgo_news(query)
+            return (
+                "News API rate limit reached. Fallback to DuckDuckGo News:\n\n"
+                f"{fallback_results}"
+            )
+        return f"Error fetching news: {error_text}"
 
 def duckduckgo_news(query: str) -> str:
     """
