@@ -32,7 +32,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from operator import add
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from newsapi import NewsApiClient
 import os
 import copy
