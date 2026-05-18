@@ -1,19 +1,35 @@
 flowchart LR
   U[User] -->|Query| UI[Streamlit UI]
-  UI -->|Prompt + State| AG[LangGraph Agent]
-  AG -->|Tool Call| W[DuckDuckGo Web Search]
-  AG -->|Tool Call| N[News API]
-  AG -->|Tool Call| D[DuckDuckGo News]
+  UI -->|Prompt + Session State| AG[LangGraph Agent Workflow]
 
-  W --> AG
-  N --> AG
-  D --> AG
+  AG -->|Tool Calls| TN[ToolNode]
+  TN -->|search_web| W[DuckDuckGo Web Search]
+  TN -->|get_news| N[News API]
+  TN -->|duckduckgo_news| D[DuckDuckGo News]
+  W -->|Results| TN
+  N -->|Results| TN
+  D -->|Results| TN
+  TN -->|Tool Messages| AG
 
-  AG -->|Markdown Report| UI
+  AG -->|LLM Invoke| G[Gemini 3 Flash Preview]
+  G -->|AI Message / Tool Calls| AG
+
+  AG -->|Final State| RP[Report Parser]
+  RP -->|Valid Markdown Report| UI
+  RP -->|Empty Output or MALFORMED_FUNCTION_CALL| FB[Fallback Synthesizer]
+  FB -->|Direct Tool Fetch + Gemini Synthesis| UI
+
   UI -->|Export| MD[Download .md]
   UI -->|Export| PDF[Download .pdf]
 
-  subgraph LLM
-    AG --> G[Gemini 2.5 Flash]
-    G --> AG
+  subgraph Stack["Runtime Stack (Upgraded)"]
+    LC[langchain >= 1.3.1]
+    LCC[langchain-core >= 1.4.0]
+    LCG[langchain-google-genai >= 4.2.2]
+    LG[langgraph >= 1.2.0]
   end
+
+  LC -.-> AG
+  LCC -.-> AG
+  LCG -.-> G
+  LG -.-> AG

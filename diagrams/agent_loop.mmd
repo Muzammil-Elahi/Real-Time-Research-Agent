@@ -1,5 +1,15 @@
 stateDiagram-v2
-  [*] --> Agent
+  [*] --> Initialize
+  Initialize --> Agent
+
   Agent --> Tools: if tool_calls
   Tools --> Agent: tool_results
-  Agent --> [*]: if no tool_calls
+
+  Agent --> ParseOutput: if no tool_calls
+  ParseOutput --> Complete: report_text present
+  ParseOutput --> FallbackSynthesis: empty_output or MALFORMED_FUNCTION_CALL
+  FallbackSynthesis --> Complete: direct synthesis success
+
+  Agent --> Error: runtime exception
+  Error --> [*]
+  Complete --> [*]
