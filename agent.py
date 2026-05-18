@@ -8,7 +8,7 @@ structured research reports.
 Architecture:
 - Frontend: Streamlit (web UI)
 - Agent Framework: LangGraph (orchestrates agent workflow)
-- LLM: Google Gemini 2.5 Flash (via LangChain)
+- LLM: Google Gemini 3 Flash (via LangChain)
 - Tools: DuckDuckGo Search, News API, DuckDuckGo News
 """
 
@@ -67,9 +67,9 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 # Initialize the LLM (Large Language Model)
-# Using Google Gemini 2.5 Flash - a fast, efficient model for this use case
+# Using Google Gemini 3 Flash - a fast, efficient model for this use case
 # The model is bound with tools later to enable function calling
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GOOGLE_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", google_api_key=GOOGLE_API_KEY)
 
 # Track tool references for transparency and UI display
 CURRENT_TOOL_REFERENCES: List[Dict[str, Any]] = []

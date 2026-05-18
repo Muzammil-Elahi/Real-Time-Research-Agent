@@ -1,0 +1,19 @@
+flowchart LR
+  U[User] -->|Query| UI[Streamlit UI]
+  UI -->|Prompt + State| AG[LangGraph Agent]
+  AG -->|Tool Call| W[DuckDuckGo Web Search]
+  AG -->|Tool Call| N[News API]
+  AG -->|Tool Call| D[DuckDuckGo News]
+
+  W --> AG
+  N --> AG
+  D --> AG
+
+  AG -->|Markdown Report| UI
+  UI -->|Export| MD[Download .md]
+  UI -->|Export| PDF[Download .pdf]
+
+  subgraph LLM
+    AG --> G[Gemini 2.5 Flash]
+    G --> AG
+  end

@@ -1,0 +1,5 @@
+stateDiagram-v2
+  [*] --> Agent
+  Agent --> Tools: if tool_calls
+  Tools --> Agent: tool_results
+  Agent --> [*]: if no tool_calls

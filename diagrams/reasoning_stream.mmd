@@ -1,0 +1,8 @@
+flowchart TD
+  A[Agent Run Starts] --> B[LangGraph stream events]
+  B --> C{Stream mode}
+  C -->|updates| D[Tool calls + observations]
+  C -->|values| E[Final response]
+  D --> F[Format log entries]
+  F --> G[UI: Reasoning panel]
+  E --> H[UI: Final report]

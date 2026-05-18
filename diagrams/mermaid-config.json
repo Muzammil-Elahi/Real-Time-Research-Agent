@@ -1,0 +1,20 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Helvetica, Arial, sans-serif",
+    "background": "#ffffff",
+    "primaryColor": "#ffffff",
+    "primaryBorderColor": "#222222",
+    "primaryTextColor": "#111111",
+    "secondaryColor": "#f7f7f7",
+    "secondaryBorderColor": "#333333",
+    "secondaryTextColor": "#111111",
+    "tertiaryColor": "#f0f0f0",
+    "tertiaryBorderColor": "#444444",
+    "tertiaryTextColor": "#111111",
+    "lineColor": "#333333",
+    "textColor": "#111111",
+    "edgeLabelBackground": "#ffffff",
+    "noteTextColor": "#111111"
+  }
+}

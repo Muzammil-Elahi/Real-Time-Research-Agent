@@ -1,0 +1,26 @@
+sequenceDiagram
+  participant User
+  participant UI as Streamlit UI
+  participant Agent as LangGraph Agent
+  participant LLM as Gemini 2.5 Flash
+  participant Web as DuckDuckGo Web
+  participant News as News API
+  participant DDG as DuckDuckGo News
+
+  User->>UI: Enter query + click Research
+  UI->>Agent: Start run with prompt + tools
+  Agent->>LLM: Ask next step
+  LLM-->>Agent: Tool call (Search_Web)
+  Agent->>Web: Execute search
+  Web-->>Agent: Results
+  Agent->>LLM: Provide results
+  LLM-->>Agent: Tool call (Search_News)
+  Agent->>News: Execute news search
+  News-->>Agent: Articles
+  Agent->>LLM: Provide results
+  LLM-->>Agent: Tool call (DDG_News)
+  Agent->>DDG: Execute news search
+  DDG-->>Agent: Articles
+  Agent->>LLM: Provide all findings
+  LLM-->>Agent: Final markdown report
+  Agent->>UI: Render + export
